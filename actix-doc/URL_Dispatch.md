@@ -147,9 +147,251 @@ foo/{name}.html
 
 字面路径 */foo/blz.html*将会匹配上面的字符模式，匹配结果将会是 `Params{'name': 'biz'}`，但字面路径“/foo/blz”不会匹配．因为他不包含段由*{name}.html*最后的文字 *.html*(它只包含 blz 不是 blz.html)
 
-为了捕获两个段，必须使用两个替代符号
+为了捕获两个段，必须使用两个替身符号
 
 ```
 foo/{name}.{ext}
+```
+
+字面路径 */foo/blz.html*将会匹配上面的路径模式，匹配结果为参数Params *{name’: ‘biz’, ‘ext’: ‘html’}*,因为两个替身符号 *{name}*和*{ext}*之间有一个句号
+
+替身符合可以可选的制定一个正则表达式来决定路径段是否匹配符号．为了指定匹配如正则表达式定义的特定字符集合的替身符号，必须使用替身符合的小小的拓展形式语法．在大括号内替身符号名字必须紧跟一个冒号，之后直接是一个正则表达式．默认的正则表达式与替身符号 *[^/]+*相关联，匹配一个或多个不为 /的字符．例如，下面的占位符 *{foo}*可以被更详细的拼为*{foo:^/+}* .可以把这个改为任意的正则表达式来匹配任意的字符序列，比如 *{foo:\d+}* 只匹配数字．
+
+为了匹配一段占位符，片段必须包括至少一个字符．例如对与URL /abc/
+
+- */abc/{foo}*不匹配
+- */{foo}/*会批评
+
+**注意:**路径是不带符合号的URL并在模式匹配前被解码为有效的unicode字符串，代表匹配的路径的值也是无符号的URL
+
+对于下面的模式
+
+```
+foo/{bar}
+```
+
+当匹配如下的URL时
+
+```
+http://example.com/foo/La%20Pe%C3%B1a
+```
+
+匹配的文件夹看起来像下面这样(解码的URL值)
+
+```
+Params{'bar': 'La Pe\xf1a'}
+```
+
+路径段中的字符串必须代表提供给actix解码后的路径．你不会想在模式中使用一个URL编码的值.例如，相比这个
+
+```
+/Foo%20Bar/{baz}
+```
+
+你更想使用像这样的
+
+```
+/Foo Bar/{baz}
+```
+
+尾匹配是可能的．为了实现这个可以使用自定义的正则
+
+```
+foo/{bar}/{tail:.*}
+```
+
+上面的模式可以批评这些URL,生成如下的匹配信息．
+
+```
+foo/1/2/           -> Params{'bar':'1', 'tail': '2/'}
+foo/abc/def/a/b/c  -> Params{'bar':u'abc', 'tail': 'def/a/b/c'}
+```
+
+
+
+## 块路由
+
+Scope帮助你组织共享根的路径，你可以在块内嵌套块．假设你想组织用于查看“Users”的端点路径，比如下面的这些路径
+
+- /users
+- /users/show
+- /users/show/{id}
+
+一个块布局会如下所示
+
+```rust
+#[get("/show")]
+async fn show_users() -> HttpResponse {
+    HttpResponse::Ok().body("Show users")
+}
+
+#[get("/show/{id}")]
+async fn user_detail(path: web::Path<(u32,)>) -> HttpResponse {
+    HttpResponse::Ok().body(format!("User detail: {}", path.into_inner().0))
+}
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    HttpServer::new(|| {
+        App::new().service(
+            web::scope("/users")
+                .service(show_users)
+                .service(user_detail),
+        )
+    })
+    .bind("127.0.0.1:8080")?
+    .run()
+    .await
+}
+```
+
+一个路径块包涵可变的路径段作为资源．和没有被块包裹的是一致的．
+
+可以通过`HttpRequest::match_info()`提取可变路径段. [`Path` 提取器](https://actix.rs/docs/extractors)也可以用来提取块级变量段．
+
+
+
+## 匹配信息
+
+所有代表匹配到的路径段的值可以在 [`HttpRequest::match_info`](https://docs.rs/actix-web/3/actix_web/struct.HttpRequest.html#method.match_info)获取．特定的值可以被 [`Path::get()`](https://docs.rs/actix-web/3/actix_web/dev/struct.Path.html#method.get)取回．
+
+```rust
+use actix_web::{get, App, HttpRequest, HttpServer, Result};
+
+#[get("/a/{v1}/{v2}/")]
+async fn index(req: HttpRequest) -> Result<String> {
+    let v1: u8 = req.match_info().get("v1").unwrap().parse().unwrap();
+    let v2: u8 = req.match_info().query("v2").parse().unwrap();
+    let (v3, v4): (u8, u8) = req.match_info().load().unwrap();
+    Ok(format!("Values {} {} {} {}", v1, v2, v3, v4))
+}
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    HttpServer::new(|| App::new().service(index))
+        .bind("127.0.0.1:8080")?
+        .run()
+        .await
+}
+```
+
+对于例子中的路径‘/a/1/2’，v1和v2被解析为1和２．
+
+## 路径信息提取器
+
+Actix提供类型安全的路径信息提取功能． [*Path*](https://docs.rs/actix-web/3/actix_web/dev/struct.Path.html) 提取信息，目标类型可以被定义为多种形式．最简单的方式是使用`tuple`类型．元组中的每一个元素与路径模式中一一对应．例如你可以用`Path<(u32, String)>`匹配路径模式`/{id}/{username}/`,但`Path<(String, String, String)>`类型会失败
+
+```rust
+use actix_web::{get, web, App, HttpServer, Result};
+
+#[get("/{username}/{id}/index.html")] // <- define path parameters
+async fn index(info: web::Path<(String, u32)>) -> Result<String> {
+    let info = info.into_inner();
+    Ok(format!("Welcome {}! id: {}", info.0, info.1))
+}
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    HttpServer::new(|| App::new().service(index))
+        .bind("127.0.0.1:8080")?
+        .run()
+        .await
+}
+```
+
+也可以用结构提取信息，这种情况下，该结构必须实现 serde的Deserialize trait
+
+```rust
+use actix_web::{get, web, App, HttpServer, Result};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Info {
+    username: String,
+}
+
+// extract path info using serde
+#[get("/{username}/index.html")] // <- define path parameters
+async fn index(info: web::Path<Info>) -> Result<String> {
+    Ok(format!("Welcome {}!", info.username))
+}
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    HttpServer::new(|| App::new().service(index))
+        .bind("127.0.0.1:8080")?
+        .run()
+        .await
+}
+```
+
+[*Query*](https://docs.rs/actix-web/3/actix_web/web/struct.Query.html) 对请求查询参数提供相似的功能．
+
+
+
+## 生成资源URL
+
+使用[*HttpRequest.url_for()*](https://docs.rs/actix-web/3/actix_web/struct.HttpRequest.html#method.url_for) 方法生成基于资源模式的URLS.例如你可以配置资源名为“foo”模式为”{a}/{b}/{c}“,可以这样做
+
+```rust
+use actix_web::{get, guard, http::header, HttpRequest, HttpResponse, Result};
+
+#[get("/test/")]
+async fn index(req: HttpRequest) -> Result<HttpResponse> {
+    let url = req.url_for("foo", &["1", "2", "3"])?; // <- generate url for "foo" resource
+
+    Ok(HttpResponse::Found()
+        .header(header::LOCATION, url.as_str())
+        .finish())
+}
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    use actix_web::{web, App, HttpServer};
+
+    HttpServer::new(|| {
+        App::new()
+            .service(
+                web::resource("/test/{a}/{b}/{c}")
+                    .name("foo") // <- set resource name, then it could be used in `url_for`
+                    .guard(guard::Get())
+                    .to(|| HttpResponse::Ok()),
+            )
+            .service(index)
+    })
+    .bind("127.0.0.1:8080")?
+    .run()
+    .await
+}
+```
+
+这将会返回类似于字符串 *http://example.com/test/1/2/3*(至少如果当前的协议和主机名暗示*http://example.com*). `url_for()`方法返回 [*Url object*](https://docs.rs/url/1.7.2/url/struct.Url.html)，所以你可以修改这个url(加入query参数，锚点等等).`url_for()`只能在具明资源上调用否则会返回错误．
+
+## 外部资源
+
+为有效url的资源可以被注册为外部资源．他们只对生成的目的URL有效，在请求时不会被考虑．
+
+```rust
+use actix_web::{get, App, HttpRequest, HttpServer, Responder};
+
+#[get("/")]
+async fn index(req: HttpRequest) -> impl Responder {
+    let url = req.url_for("youtube", &["oHg5SJYRHA0"]).unwrap();
+    assert_eq!(url.as_str(), "https://youtube.com/watch/oHg5SJYRHA0");
+
+    url.into_string()
+}
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    HttpServer::new(|| {
+        App::new()
+            .service(index)
+            .external_resource("youtube", "https://youtube.com/watch/{video_id}")
+    })
+    .bind("127.0.0.1:8080")?
+    .run()
+    .await
+}
 ```
 
